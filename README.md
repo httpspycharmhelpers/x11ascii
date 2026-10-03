@@ -37,6 +37,15 @@ go build -o x11ascii .
 
 # 边看边操作：把终端键盘/鼠标回传给 X（仅 x11 源）
 ./x11ascii -source x11 -display :0 -input
+
+# 包裹启动一个程序：显示并操作它，本程序退出时一并结束子进程
+./x11ascii -source x11 -display :0 -input -w 120 -h 30 \
+  -exec "dosbox -nosound -fullscreen -c 'mount c ~/dosgames/wolf' -c 'c:' -c 'WOLF3D.EXE'"
+
+# 显示并操作 Firefox（Termux:X11 下必须关掉 GPU/GL，否则只会出现占位窗口）
+./x11ascii -source x11 -display :0 -input \
+  -exec "env GDK_BACKEND=x11 MOZ_ENABLE_WAYLAND=0 MOZ_DISABLE_GPU=1 MOZ_WEBRENDER=0 \
+         MOZ_ACCELERATED=0 GDK_GL=disable LIBGL_ALWAYS_SOFTWARE=1 firefox about:blank"
 ```
 
 交互模式下按 `q`（或 Ctrl+C）退出；开了 `-input` 后 `q` 等键会转发给 X，用 **Ctrl+C** 退出。
@@ -59,6 +68,9 @@ go build -o x11ascii .
 | `-probe` | 连接 X11、打印 screen/depth/抓帧自检后退出 |
 | `-input` | 把终端键盘/鼠标事件回传给 X（XTest，仅 `x11` 源）；Ctrl+C 退出 |
 | `-mouse` | `-input` 模式下启用终端鼠标报告（默认开） |
+| `-exec` | 先启动并包裹一个命令（如 `dosbox ...`），本程序退出时结束它 |
+| `-render` | 用 XRender 在服务端把整屏缩到终端网格再回传（默认开；失败自动回退 `XGetImage`） |
+| `-idle-fps` | 画面无变化时降到的帧率（默认 5；`0`=不降帧） |
 
 ## 颜色
 
@@ -97,10 +109,28 @@ grep keysym /tmp/xev.log   # 应能看到 z / A / Up / F5 / Ctrl-a 等
 
 ## 性能
 
-- 转换与输出是零分配（复用缓冲）、只写变化格、颜色游程缓存，本机 80×24 合成源可达 600+ fps。
-- 抓屏：`x11` 后端的 `XGetImage` 每帧要把整幅图经 X 套接字拷回，大分辨率下是瓶颈。真正的 X 主机上建议用
-  `-source cmd` 配合 `ffmpeg x11grab`（可用性更好，且可让 ffmpeg 直接缩放到目标尺寸）。
-- **Android/Termux 无 SysV 共享内存**，故未启用 MIT-SHM；`x11` 后端在 Termux 上走 `XGetImage`。
+- 转换与输出零分配（复用缓冲）、只写变化格、颜色游程缓存；内置图案源本机可达 600+ fps。
+- **服务端 XRender 缩放（`-render`，默认开）**：不再把整屏像素经 X 套接字拷回，而是让 X 服务端用
+  RENDER 把整屏缩放/过滤到终端网格（`列 × 行×2`）后再回传，每帧数据量从数 MB 降到几十 KB。
+  实测 Termux:X11 全屏 1080×1471、输出 100×30：**每 100 帧 7.5s → 0.42s（约 18×）**；
+  RENDER 不可用时自动回退 `XGetImage`。
+- **空闲降帧（`-idle-fps`，默认 5）**：画面与上一帧完全相同时主循环自动降帧，静止桌面几乎不耗 CPU，活动时立即恢复。
+- 走 `XGetImage` 回退路径时，可用 `-region` 只抓目标窗口以减小回传量。
+- **Android/Termux 无 SysV 共享内存**，故未启用 MIT-SHM；上面的 RENDER 服务端缩放已覆盖该场景。
+  真正的 Linux 主机也可用 `-source cmd` 配合 `ffmpeg x11grab`（可让 ffmpeg 直接缩放到目标尺寸）。
+
+## 运行任意程序
+
+`-exec` 让你把要显示/操作的程序交给 `x11ascii` 一起启动、退出时整组清理（例如 DOSBox、浏览器）：
+
+```sh
+# 德军总部 3D（官方 shareware v1.4）经 DOSBox 全屏运行，方向键移动
+./x11ascii -source x11 -display :0 -input -w 120 -h 30 \
+  -exec "dosbox -nosound -fullscreen -c 'mount c ~/dosgames/wolf' -c 'c:' -c 'WOLF3D.EXE'"
+```
+
+注意（Termux:X11）：Firefox 默认的 GPU/GL 初始化会卡住导致只出 10×10 占位窗口，
+用上面的 `GDK_GL=disable LIBGL_ALWAYS_SOFTWARE=1 …` 关掉即可正常出窗。
 
 ## 限制
 
