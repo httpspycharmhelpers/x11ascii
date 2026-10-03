@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -138,6 +139,7 @@ func run() int {
 	probe := flag.Bool("probe", false, "连接 X11 并打印 screen/depth/抓帧自检后退出")
 	input := flag.Bool("input", false, "把终端键盘/鼠标事件回传给 X（XTest，仅 x11 源；Ctrl+C 退出）")
 	mouse := flag.Bool("mouse", true, "input 模式下启用终端鼠标报告")
+	execCmd := flag.String("exec", "", "启动并包裹一个命令（如 dosbox ...），退出时结束它")
 	flag.Parse()
 
 	if *probe {
@@ -146,6 +148,21 @@ func run() int {
 			return 1
 		}
 		return 0
+	}
+
+	var child *exec.Cmd
+	if *execCmd != "" {
+		d := *display
+		if d == "" {
+			d = os.Getenv("DISPLAY")
+		}
+		var err error
+		child, err = startChild(*execCmd, d)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "启动命令失败:", err)
+			return 1
+		}
+		defer stopChild(child)
 	}
 
 	if *once {
