@@ -41,7 +41,7 @@ func parseSize(s string) (w, h int, err error) {
 	return w, h, nil
 }
 
-func buildSource(kind, display, region, command, srcsize string, verbose bool) (Source, error) {
+func buildSource(kind, display, region, command, srcsize string, renderOn, verbose bool) (Source, error) {
 	logf := func(format string, a ...any) {
 		if verbose {
 			fmt.Fprintf(os.Stderr, format, a...)
@@ -66,19 +66,27 @@ func buildSource(kind, display, region, command, srcsize string, verbose bool) (
 		logf("source: 命令管道 %dx%d: %s\n", w, h, command)
 		return newCmdSource(command, w, h)
 	case "x11":
-		s, err := newX11Source(display, region)
+		s, err := newX11Source(display, region, renderOn)
 		if err != nil {
 			return nil, err
 		}
 		w, h := s.Size()
 		logf("source: X11 display=%q region=%q %dx%d\n", x11Display(display), region, w, h)
+		if renderOn && s.rnd {
+			logf("source: X11 服务端 RENDER 缩放已启用\n")
+		} else if s.renderErr != nil {
+			logf("source: X11 服务端缩放不可用(%v)，用 XGetImage\n", s.renderErr)
+		}
 		return s, nil
 	case "auto":
 		if display != "" || os.Getenv("DISPLAY") != "" {
-			s, err := newX11Source(display, region)
+			s, err := newX11Source(display, region, renderOn)
 			if err == nil {
 				w, h := s.Size()
 				logf("source: X11(自动) display=%q %dx%d\n", x11Display(display), w, h)
+				if renderOn && s.rnd {
+					logf("source: X11 服务端 RENDER 缩放已启用\n")
+				}
 				return s, nil
 			}
 			logf("X11 连接失败(%v)，尝试回退\n", err)
@@ -135,6 +143,8 @@ func run() int {
 	frames := flag.Int("frames", 0, "渲染多少帧后退出（0=不限）")
 	once := flag.Bool("once", false, "只渲染一帧后退出")
 	use256 := flag.Bool("256", false, "用 ANSI-256 调色板量化颜色（省带宽、兼容老终端）")
+	renderOn := flag.Bool("render", true, "用 XRender 在服务端缩放整屏（大幅省带宽，失败自动回退 XGetImage）")
+	idleFPS := flag.Int("idle-fps", 5, "画面无变化时降到的帧率（0=不降帧）")
 	verbose := flag.Bool("v", true, "输出源/显示等诊断信息到 stderr")
 	probe := flag.Bool("probe", false, "连接 X11 并打印 screen/depth/抓帧自检后退出")
 	input := flag.Bool("input", false, "把终端键盘/鼠标事件回传给 X（XTest，仅 x11 源；Ctrl+C 退出）")
@@ -200,12 +210,16 @@ func run() int {
 		rows = 24
 	}
 
-	src, err := buildSource(*source, *display, *region, *command, *srcsize, *verbose)
+	src, err := buildSource(*source, *display, *region, *command, *srcsize, *renderOn, *verbose)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "错误:", err)
 		return 1
 	}
 	defer src.Close()
+
+	if xs, ok := src.(*x11Source); ok {
+		xs.setTermSize(cols, rows)
+	}
 
 	var xsrc *x11Source
 	if *input {
@@ -283,8 +297,12 @@ func run() int {
 	out := newWriter(os.Stdout, mode)
 
 	interval := time.Second / time.Duration(*fps)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	idleInterval := interval
+	if *idleFPS > 0 {
+		if d := time.Second / time.Duration(*idleFPS); d > idleInterval {
+			idleInterval = d
+		}
+	}
 
 	for i := 0; ; i++ {
 		select {
@@ -306,8 +324,8 @@ func run() int {
 				}
 			}
 		}
-		if xsrc != nil {
-			xsrc.setTermSize(cols, rows)
+		if xs, ok := src.(*x11Source); ok {
+			xs.setTermSize(cols, rows)
 		}
 
 		if err := src.Grab(&frame); err != nil {
@@ -330,10 +348,16 @@ func run() int {
 		if !interactive {
 			continue
 		}
+		wait := interval
+		if idleInterval > interval {
+			if xs, ok := src.(*x11Source); ok && xs.Idle() {
+				wait = idleInterval
+			}
+		}
 		select {
 		case <-quit:
 			return 0
-		case <-ticker.C:
+		case <-time.After(wait):
 		}
 	}
 	return 0
