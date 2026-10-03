@@ -71,15 +71,6 @@ go build -o x11ascii .
 ./x11ascii -probe -display :0     # 连接、打印 screen/depth/socket，再抓一帧验证
 ```
 
-Termux / Termux:X11 上最常见的两个坑：
-
-1. **`DISPLAY` 没到你的 shell**。像 `startx11` 这类脚本里的 `export DISPLAY=:0` 只作用于脚本自身，
-   脚本退出后你的终端仍然没有 `DISPLAY`（子进程改不了父进程环境）。→ 用 `-display :0` 显式指定，
-   或自己在 shell 里 `export DISPLAY=:0`。
-2. **没有 `/tmp`**。xgb 默认写死 `/tmp/.X11-unix/X0`，而 Termux 的 X socket 在
-   `$PREFIX/tmp/.X11-unix/X0`。本程序会依次尝试 `$X11_SOCKET`、`$PREFIX/tmp`、`$TMPDIR`、`$HOME`、`/tmp`，
-   自己 dial 后再交给 xgb，因此无需 `export`，`-display :0` 即可连上。`-display` 也可直接给完整 socket 路径。
-
 其它：
 
 - `探测失败: DISPLAY 未设置` → 加 `-display :0`。
