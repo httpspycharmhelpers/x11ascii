@@ -6,16 +6,24 @@ import (
 	"strconv"
 )
 
+type colorMode int
+
+const (
+	modeTrue colorMode = iota
+	mode256
+)
+
 type cell struct {
-	fg, bg [3]byte
+	fg, bg uint32
 }
 
 type Writer struct {
 	buf     *bufio.Writer
+	mode    colorMode
 	cols    int
 	rows    int
 	prev    []cell
-	fg, bg  [3]byte
+	fg, bg  uint32
 	haveFG  bool
 	haveBG  bool
 	curX    int
@@ -23,21 +31,61 @@ type Writer struct {
 	scratch []byte
 }
 
-func newWriter(w io.Writer) *Writer {
+func newWriter(w io.Writer, mode colorMode) *Writer {
 	return &Writer{
 		buf:  bufio.NewWriterSize(w, 1<<18),
+		mode: mode,
 		curX: -1,
 		curY: -1,
 	}
 }
 
-func append3(b []byte, c [3]byte) []byte {
-	b = strconv.AppendUint(b, uint64(c[0]), 10)
+func packRGB(c [3]byte) uint32 {
+	return uint32(c[0])<<16 | uint32(c[1])<<8 | uint32(c[2])
+}
+
+func appendRGB(b []byte, v uint32) []byte {
+	b = strconv.AppendUint(b, uint64(byte(v>>16)), 10)
 	b = append(b, ';')
-	b = strconv.AppendUint(b, uint64(c[1]), 10)
+	b = strconv.AppendUint(b, uint64(byte(v>>8)), 10)
 	b = append(b, ';')
-	b = strconv.AppendUint(b, uint64(c[2]), 10)
+	b = strconv.AppendUint(b, uint64(byte(v)), 10)
 	return b
+}
+
+func (w *Writer) colorOf(c [3]byte) uint32 {
+	if w.mode == mode256 {
+		return uint32(nearest256(c[0], c[1], c[2]))
+	}
+	return packRGB(c)
+}
+
+func (w *Writer) appendSGR(b []byte, needFG, needBG bool, fg, bg uint32) []byte {
+	b = append(b, "\x1b["...)
+	first := true
+	if needFG {
+		if w.mode == mode256 {
+			b = append(b, "38;5;"...)
+			b = strconv.AppendUint(b, uint64(fg), 10)
+		} else {
+			b = append(b, "38;2;"...)
+			b = appendRGB(b, fg)
+		}
+		first = false
+	}
+	if needBG {
+		if !first {
+			b = append(b, ';')
+		}
+		if w.mode == mode256 {
+			b = append(b, "48;5;"...)
+			b = strconv.AppendUint(b, uint64(bg), 10)
+		} else {
+			b = append(b, "48;2;"...)
+			b = appendRGB(b, bg)
+		}
+	}
+	return append(b, 'm')
 }
 
 func (w *Writer) Write(c *Canvas) error {
@@ -53,9 +101,12 @@ func (w *Writer) Write(c *Canvas) error {
 		for col := 0; col < c.Cols; col++ {
 			top := (row*2*c.Cols + col) * 3
 			bot := ((row*2+1)*c.Cols + col) * 3
-			var fg, bg [3]byte
-			copy(fg[:], c.Pix[top:top+3])
-			copy(bg[:], c.Pix[bot:bot+3])
+			var fgc, bgc [3]byte
+			copy(fgc[:], c.Pix[top:top+3])
+			copy(bgc[:], c.Pix[bot:bot+3])
+			fg := w.colorOf(fgc)
+			bg := w.colorOf(bgc)
+
 			ci := row*c.Cols + col
 			if w.prev[ci].fg == fg && w.prev[ci].bg == bg {
 				continue
@@ -71,21 +122,7 @@ func (w *Writer) Write(c *Canvas) error {
 			needFG := !w.haveFG || w.fg != fg
 			needBG := !w.haveBG || w.bg != bg
 			if needFG || needBG {
-				b = append(b, "\x1b["...)
-				first := true
-				if needFG {
-					b = append(b, "38;2;"...)
-					b = append3(b, fg)
-					first = false
-				}
-				if needBG {
-					if !first {
-						b = append(b, ';')
-					}
-					b = append(b, "48;2;"...)
-					b = append3(b, bg)
-				}
-				b = append(b, 'm')
+				b = w.appendSGR(b, needFG, needBG, fg, bg)
 				w.fg, w.bg = fg, bg
 				w.haveFG, w.haveBG = true, true
 			}

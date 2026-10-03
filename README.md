@@ -51,6 +51,26 @@ go build -o x11ascii .
 | `-fps` | 目标帧率（默认 30） |
 | `-frames` | 渲染多少帧后退出（`0`=不限） |
 | `-once` | 只渲染一帧后退出 |
+| `-256` | 用 ANSI-256 调色板量化颜色（省带宽、兼容不支持真彩的终端） |
+| `-v` | 输出源/显示等诊断信息到 stderr（默认开） |
+| `-probe` | 连接 X11、打印 screen/depth/抓帧自检后退出 |
+
+## 颜色
+
+- 默认 **24-bit 真彩**（`\x1b[38;2;R;G;Bm`），需要终端支持（`COLORTERM=truecolor`）。
+- `-256` 改为 **ANSI-256**（`\x1b[38;5;Nm`），用 6×6×6 色立方 + 24 级灰阶做最近色量化，字节更少、老终端也能显示。
+
+## 排错（`-source x11` 没画面时）
+
+```sh
+echo $DISPLAY                 # 必须非空，例如 :0
+./x11ascii -probe             # 连接 X11 并打印 screen/depth，再抓一帧验证
+```
+
+- `探测失败: empty display string` → 当前 shell 没有 `DISPLAY`。用**启动 X 的同一个 shell**运行，或先
+  `export DISPLAY=:0`（按 `startx11` 实际打印的编号改）。
+- 若 X11 连接成功但抓帧报 `不支持的像素字节数` → 该 X 的根窗口不是 24/32bpp，把 `-probe` 输出发来。
+- 首次抓帧会发生在进入 alt screen **之前**，失败信息在普通终端上可见，不会再"一闪而过"。
 
 ## 性能
 

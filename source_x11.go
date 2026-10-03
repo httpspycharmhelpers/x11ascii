@@ -110,6 +110,33 @@ func (s *x11Source) Close() error {
 	return nil
 }
 
+func x11Probe(display string) error {
+	s, err := newX11Source(display, "")
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	setup := xproto.Setup(s.conn)
+	root := setup.Roots[0]
+	fmt.Printf("X11 连接成功\n")
+	fmt.Printf("  display        : %s\n", func() string {
+		if display != "" {
+			return display
+		}
+		return "(来自 $DISPLAY)"
+	}())
+	fmt.Printf("  screen         : %dx%d\n", root.WidthInPixels, root.HeightInPixels)
+	fmt.Printf("  root depth     : %d\n", root.RootDepth)
+	fmt.Printf("  image byteorder: %d (0=LSB,1=MSB)\n", setup.ImageByteOrder)
+	var f Frame
+	if err := s.Grab(&f); err != nil {
+		return fmt.Errorf("抓帧失败: %w", err)
+	}
+	fmt.Printf("抓帧成功: %dx%d stride=%d 像素0=(%d,%d,%d)\n",
+		f.W, f.H, f.Stride, f.Pix[0], f.Pix[1], f.Pix[2])
+	return nil
+}
+
 func parseRegion(s string) (x, y, w, h int, err error) {
 	parts := strings.FieldsFunc(s, func(r rune) bool { return r == 'x' || r == 'X' || r == '+' })
 	if len(parts) < 2 {

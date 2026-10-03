@@ -22,7 +22,7 @@ func fill(c *Canvas, top, bot [3]byte) {
 
 func TestWriterSkipsUnchanged(t *testing.T) {
 	var buf bytes.Buffer
-	w := newWriter(&buf)
+	w := newWriter(&buf, modeTrue)
 	c := &Canvas{Cols: 3, Rows: 1, Pix: make([]byte, 18)}
 	fill(c, [3]byte{255, 0, 0}, [3]byte{0, 0, 255})
 
@@ -46,7 +46,7 @@ func TestWriterSkipsUnchanged(t *testing.T) {
 
 func TestWriterOnlyRewritesChangedCell(t *testing.T) {
 	var buf bytes.Buffer
-	w := newWriter(&buf)
+	w := newWriter(&buf, modeTrue)
 	c := &Canvas{Cols: 4, Rows: 1, Pix: make([]byte, 24)}
 	fill(c, [3]byte{0, 0, 0}, [3]byte{0, 0, 0})
 	w.Write(c)
@@ -68,7 +68,7 @@ func TestWriterOnlyRewritesChangedCell(t *testing.T) {
 
 func TestWriterResizeClears(t *testing.T) {
 	var buf bytes.Buffer
-	w := newWriter(&buf)
+	w := newWriter(&buf, modeTrue)
 	c := &Canvas{Cols: 2, Rows: 1, Pix: make([]byte, 12)}
 	w.Write(c)
 	n := buf.Len()

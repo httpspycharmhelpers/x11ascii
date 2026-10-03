@@ -39,14 +39,19 @@ func parseSize(s string) (w, h int, err error) {
 	return w, h, nil
 }
 
-func buildSource(kind, display, region, command, srcsize string) (Source, error) {
+func buildSource(kind, display, region, command, srcsize string, verbose bool) (Source, error) {
+	logf := func(format string, a ...any) {
+		if verbose {
+			fmt.Fprintf(os.Stderr, format, a...)
+		}
+	}
 	switch kind {
 	case "test":
 		w, h, err := parseSize(srcsize)
 		if err != nil {
 			return nil, err
 		}
-		fmt.Fprintf(os.Stderr, "source: 内置测试图案 %dx%d\n", w, h)
+		logf("source: 内置测试图案 %dx%d\n", w, h)
 		return newPatternSource(w, h), nil
 	case "cmd":
 		if command == "" {
@@ -56,7 +61,7 @@ func buildSource(kind, display, region, command, srcsize string) (Source, error)
 		if err != nil {
 			return nil, err
 		}
-		fmt.Fprintf(os.Stderr, "source: 命令管道 %dx%d: %s\n", w, h, command)
+		logf("source: 命令管道 %dx%d: %s\n", w, h, command)
 		return newCmdSource(command, w, h)
 	case "x11":
 		s, err := newX11Source(display, region)
@@ -64,31 +69,41 @@ func buildSource(kind, display, region, command, srcsize string) (Source, error)
 			return nil, err
 		}
 		w, h := s.Size()
-		fmt.Fprintf(os.Stderr, "source: X11 %dx%d\n", w, h)
+		logf("source: X11 display=%q region=%q %dx%d\n", x11Display(display), region, w, h)
 		return s, nil
 	case "auto":
 		if display != "" || os.Getenv("DISPLAY") != "" {
 			s, err := newX11Source(display, region)
 			if err == nil {
 				w, h := s.Size()
-				fmt.Fprintf(os.Stderr, "source: X11(自动) %dx%d\n", w, h)
+				logf("source: X11(自动) display=%q %dx%d\n", x11Display(display), w, h)
 				return s, nil
 			}
-			fmt.Fprintf(os.Stderr, "X11 连接失败(%v)，尝试回退\n", err)
+			logf("X11 连接失败(%v)，尝试回退\n", err)
 		}
 		if command != "" {
 			w, h, err := parseSize(srcsize)
 			if err == nil {
-				fmt.Fprintf(os.Stderr, "source: 命令管道(自动) %dx%d\n", w, h)
+				logf("source: 命令管道(自动) %dx%d\n", w, h)
 				return newCmdSource(command, w, h)
 			}
 		}
 		w, h, _ := parseSize(srcsize)
-		fmt.Fprintf(os.Stderr, "source: 内置测试图案(回退) %dx%d\n", w, h)
+		logf("source: 内置测试图案(回退) %dx%d\n", w, h)
 		return newPatternSource(w, h), nil
 	default:
 		return nil, fmt.Errorf("未知 -source %q（auto|x11|cmd|test）", kind)
 	}
+}
+
+func x11Display(display string) string {
+	if display != "" {
+		return display
+	}
+	if d := os.Getenv("DISPLAY"); d != "" {
+		return d
+	}
+	return "(未设置)"
 }
 
 func readQuit(fd int, quit chan struct{}, once *sync.Once) {
@@ -117,13 +132,28 @@ func run() int {
 	fps := flag.Int("fps", 30, "目标帧率")
 	frames := flag.Int("frames", 0, "渲染多少帧后退出（0=不限）")
 	once := flag.Bool("once", false, "只渲染一帧后退出")
+	use256 := flag.Bool("256", false, "用 ANSI-256 调色板量化颜色（省带宽、兼容老终端）")
+	verbose := flag.Bool("v", true, "输出源/显示等诊断信息到 stderr")
+	probe := flag.Bool("probe", false, "连接 X11 并打印 screen/depth/抓帧自检后退出")
 	flag.Parse()
+
+	if *probe {
+		if err := x11Probe(*display); err != nil {
+			fmt.Fprintln(os.Stderr, "探测失败:", err)
+			return 1
+		}
+		return 0
+	}
 
 	if *once {
 		*frames = 1
 	}
 	if *fps < 1 {
 		*fps = 1
+	}
+	mode := modeTrue
+	if *use256 {
+		mode = mode256
 	}
 
 	stdin := int(os.Stdin.Fd())
@@ -150,12 +180,20 @@ func run() int {
 		rows = 24
 	}
 
-	src, err := buildSource(*source, *display, *region, *command, *srcsize)
+	src, err := buildSource(*source, *display, *region, *command, *srcsize, *verbose)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "错误:", err)
 		return 1
 	}
 	defer src.Close()
+
+	// 先进 alt screen 之前先抓一帧：失败时错误信息在普通终端上可见
+	var frame Frame
+	var canvas Canvas
+	if err := src.Grab(&frame); err != nil {
+		fmt.Fprintln(os.Stderr, "首次抓屏失败:", err)
+		return 1
+	}
 
 	var rs *rawState
 	interactive := tty && !*once
@@ -186,9 +224,7 @@ func run() int {
 		}
 	}()
 
-	var frame Frame
-	var canvas Canvas
-	out := newWriter(os.Stdout)
+	out := newWriter(os.Stdout, mode)
 
 	interval := time.Second / time.Duration(*fps)
 	ticker := time.NewTicker(interval)
