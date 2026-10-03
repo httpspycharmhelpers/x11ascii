@@ -2,6 +2,11 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -15,18 +20,81 @@ type x11Source struct {
 	x, y int
 	w, h int
 	lsb  bool
+	path string
+}
+
+// dialX11 自己解析 DISPLAY 并连接，避免 xgb 硬编码 /tmp/.X11-unix（Termux 无 /tmp）。
+func dialX11(display string) (*xgb.Conn, string, error) {
+	xgb.Logger = log.New(io.Discard, "", 0)
+	d := display
+	if d == "" {
+		d = os.Getenv("DISPLAY")
+	}
+	if d == "" {
+		return nil, "", fmt.Errorf("DISPLAY 未设置（可用 -display :0，或 export DISPLAY=:0）")
+	}
+	if strings.HasPrefix(d, "/") {
+		c, err := dialUnix(d)
+		return c, d, err
+	}
+	if strings.HasPrefix(d, ":") || strings.HasPrefix(d, "unix:") {
+		num := d
+		if i := strings.IndexByte(num, ':'); i >= 0 {
+			num = num[i+1:]
+		}
+		if i := strings.IndexByte(num, '.'); i >= 0 {
+			num = num[:i]
+		}
+		cands := socketCandidates(num)
+		var lastErr error
+		for _, p := range cands {
+			if _, err := os.Stat(p); err != nil {
+				continue
+			}
+			c, err := dialUnix(p)
+			if err == nil {
+				return c, p, nil
+			}
+			lastErr = err
+		}
+		if lastErr != nil {
+			return nil, "", fmt.Errorf("连接 X socket 失败: %w", lastErr)
+		}
+		return nil, "", fmt.Errorf("找不到 X socket（尝试过 %v）", cands)
+	}
+	c, err := xgb.NewConnDisplay(d)
+	return c, d, err
+}
+
+func dialUnix(path string) (*xgb.Conn, error) {
+	nc, err := net.Dial("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	return xgb.NewConnNet(nc)
+}
+
+func socketCandidates(num string) []string {
+	name := "X" + num
+	var out []string
+	if p := os.Getenv("X11_SOCKET"); p != "" {
+		out = append(out, p)
+	}
+	if pref := os.Getenv("PREFIX"); pref != "" {
+		out = append(out, filepath.Join(pref, "tmp", ".X11-unix", name))
+	}
+	if td := os.Getenv("TMPDIR"); td != "" {
+		out = append(out, filepath.Join(td, ".X11-unix", name))
+	}
+	if home := os.Getenv("HOME"); home != "" {
+		out = append(out, filepath.Join(home, ".X11-unix", name))
+	}
+	out = append(out, filepath.Join("/tmp", ".X11-unix", name))
+	return out
 }
 
 func newX11Source(display, region string) (*x11Source, error) {
-	var (
-		conn *xgb.Conn
-		err  error
-	)
-	if display != "" {
-		conn, err = xgb.NewConnDisplay(display)
-	} else {
-		conn, err = xgb.NewConn()
-	}
+	conn, path, err := dialX11(display)
 	if err != nil {
 		return nil, err
 	}
@@ -42,6 +110,7 @@ func newX11Source(display, region string) (*x11Source, error) {
 		w:    int(root.WidthInPixels),
 		h:    int(root.HeightInPixels),
 		lsb:  setup.ImageByteOrder == 0,
+		path: path,
 	}
 	if region != "" {
 		x, y, w, h, err := parseRegion(region)
@@ -126,6 +195,7 @@ func x11Probe(display string) error {
 		return "(来自 $DISPLAY)"
 	}())
 	fmt.Printf("  screen         : %dx%d\n", root.WidthInPixels, root.HeightInPixels)
+	fmt.Printf("  socket         : %s\n", s.path)
 	fmt.Printf("  root depth     : %d\n", root.RootDepth)
 	fmt.Printf("  image byteorder: %d (0=LSB,1=MSB)\n", setup.ImageByteOrder)
 	var f Frame

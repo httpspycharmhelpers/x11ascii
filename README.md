@@ -63,14 +63,23 @@ go build -o x11ascii .
 ## 排错（`-source x11` 没画面时）
 
 ```sh
-echo $DISPLAY                 # 必须非空，例如 :0
-./x11ascii -probe             # 连接 X11 并打印 screen/depth，再抓一帧验证
+./x11ascii -probe -display :0     # 连接、打印 screen/depth/socket，再抓一帧验证
 ```
 
-- `探测失败: empty display string` → 当前 shell 没有 `DISPLAY`。用**启动 X 的同一个 shell**运行，或先
-  `export DISPLAY=:0`（按 `startx11` 实际打印的编号改）。
-- 若 X11 连接成功但抓帧报 `不支持的像素字节数` → 该 X 的根窗口不是 24/32bpp，把 `-probe` 输出发来。
-- 首次抓帧会发生在进入 alt screen **之前**，失败信息在普通终端上可见，不会再"一闪而过"。
+Termux / Termux:X11 上最常见的两个坑：
+
+1. **`DISPLAY` 没到你的 shell**。像 `startx11` 这类脚本里的 `export DISPLAY=:0` 只作用于脚本自身，
+   脚本退出后你的终端仍然没有 `DISPLAY`（子进程改不了父进程环境）。→ 用 `-display :0` 显式指定，
+   或自己在 shell 里 `export DISPLAY=:0`。
+2. **没有 `/tmp`**。xgb 默认写死 `/tmp/.X11-unix/X0`，而 Termux 的 X socket 在
+   `$PREFIX/tmp/.X11-unix/X0`。本程序会依次尝试 `$X11_SOCKET`、`$PREFIX/tmp`、`$TMPDIR`、`$HOME`、`/tmp`，
+   自己 dial 后再交给 xgb，因此无需 `export`，`-display :0` 即可连上。`-display` 也可直接给完整 socket 路径。
+
+其它：
+
+- `探测失败: DISPLAY 未设置` → 加 `-display :0`。
+- 抓帧报 `不支持的像素字节数` → 根窗口不是 24/32bpp，把 `-probe` 输出发来。
+- 首次抓帧在进入 alt screen **之前**，失败信息在普通终端上可见。
 
 ## 性能
 
