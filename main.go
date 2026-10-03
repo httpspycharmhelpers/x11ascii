@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -224,6 +225,16 @@ func run() int {
 		}
 	}()
 
+	var needClear int32
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	defer signal.Stop(winch)
+	go func() {
+		for range winch {
+			atomic.StoreInt32(&needClear, 1)
+		}
+	}()
+
 	out := newWriter(os.Stdout, mode)
 
 	interval := time.Second / time.Duration(*fps)
@@ -259,6 +270,9 @@ func run() int {
 			return 1
 		}
 		convert(&frame, cols, rows, &canvas)
+		if interactive && atomic.SwapInt32(&needClear, 0) == 1 {
+			out.Clear()
+		}
 		if err := out.Write(&canvas); err != nil {
 			return 1
 		}

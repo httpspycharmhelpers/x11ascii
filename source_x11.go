@@ -15,12 +15,13 @@ import (
 )
 
 type x11Source struct {
-	conn *xgb.Conn
-	win  xproto.Window
-	x, y int
-	w, h int
-	lsb  bool
-	path string
+	conn  *xgb.Conn
+	win   xproto.Window
+	x, y  int
+	w, h  int
+	lsb   bool
+	path  string
+	fixed bool
 }
 
 // dialX11 自己解析 DISPLAY 并连接，避免 xgb 硬编码 /tmp/.X11-unix（Termux 无 /tmp）。
@@ -125,15 +126,29 @@ func newX11Source(display, region string) (*x11Source, error) {
 			s.h = h
 		}
 		s.x, s.y = x, y
+		s.fixed = true
 	}
 	return s, nil
 }
 
 func (s *x11Source) Size() (int, int) { return s.w, s.h }
 
-func (s *x11Source) Grab(f *Frame) error {
-	reply, err := xproto.GetImage(s.conn, xproto.ImageFormatZPixmap, xproto.Drawable(s.win),
+func (s *x11Source) getImage() (*xproto.GetImageReply, error) {
+	return xproto.GetImage(s.conn, xproto.ImageFormatZPixmap, xproto.Drawable(s.win),
 		int16(s.x), int16(s.y), uint16(s.w), uint16(s.h), 0xffffffff).Reply()
+}
+
+func (s *x11Source) Grab(f *Frame) error {
+	reply, err := s.getImage()
+	if err != nil && !s.fixed {
+		if geo, gerr := xproto.GetGeometry(s.conn, xproto.Drawable(s.win)).Reply(); gerr == nil {
+			nw, nh := int(geo.Width), int(geo.Height)
+			if nw > 0 && nh > 0 && (nw != s.w || nh != s.h) {
+				s.w, s.h = nw, nh
+				reply, err = s.getImage()
+			}
+		}
+	}
 	if err != nil {
 		return err
 	}

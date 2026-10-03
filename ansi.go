@@ -88,6 +88,12 @@ func (w *Writer) appendSGR(b []byte, needFG, needBG bool, fg, bg uint32) []byte 
 	return append(b, 'm')
 }
 
+func (w *Writer) Clear() {
+	w.cols, w.rows = -1, -1
+	w.haveFG, w.haveBG = false, false
+	w.curX, w.curY = -1, -1
+}
+
 func (w *Writer) Write(c *Canvas) error {
 	if w.cols != c.Cols || w.rows != c.Rows {
 		w.cols, w.rows = c.Cols, c.Rows
