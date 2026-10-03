@@ -34,9 +34,12 @@ go build -o x11ascii .
 
 # 无 X 环境自测（内置动态图案）
 ./x11ascii -source test -w 80 -h 24
+
+# 边看边操作：把终端键盘/鼠标回传给 X（仅 x11 源）
+./x11ascii -source x11 -display :0 -input
 ```
 
-运行时按 `q`（或 Ctrl+C）退出。
+交互模式下按 `q`（或 Ctrl+C）退出；开了 `-input` 后 `q` 等键会转发给 X，用 **Ctrl+C** 退出。
 
 ## 参数
 
@@ -54,6 +57,8 @@ go build -o x11ascii .
 | `-256` | 用 ANSI-256 调色板量化颜色（省带宽、兼容不支持真彩的终端） |
 | `-v` | 输出源/显示等诊断信息到 stderr（默认开） |
 | `-probe` | 连接 X11、打印 screen/depth/抓帧自检后退出 |
+| `-input` | 把终端键盘/鼠标事件回传给 X（XTest，仅 `x11` 源）；Ctrl+C 退出 |
+| `-mouse` | `-input` 模式下启用终端鼠标报告（默认开） |
 
 ## 颜色
 
@@ -81,6 +86,24 @@ Termux / Termux:X11 上最常见的两个坑：
 - 抓帧报 `不支持的像素字节数` → 根窗口不是 24/32bpp，把 `-probe` 输出发来。
 - 首次抓帧在进入 alt screen **之前**，失败信息在普通终端上可见。
 
+## 输入回传（`-input`）
+
+用 XTest 扩展把终端按键 / 鼠标事件注入 X，让终端里看到的画面可以真正被操作（玩 X 游戏、点窗口等）。
+仅 `x11` 源支持；启动时会读取服务器的键盘映射（keysym→keycode）与修饰键映射，自动处理大小写与 Shift、Ctrl、Alt 组合。
+
+- 普通字符、`Enter`/`Tab`/`Backspace`/`Esc`、方向键、`Home/End/PageUp/PageDown/Insert/Delete`、`F1`–`F12`、`Alt+键`、UTF-8 字符均可。
+- 鼠标：`-mouse`（默认开）会开启终端 SGR 鼠标报告，左/中/右键、滚轮、拖动都会按当前终端网格映射到源像素坐标。
+- 退出用 **Ctrl+C**（`q` 等键会原样转发给 X）。
+
+自测（需要真实 X 与 `xev`，`xorg-xev` 包）：
+
+```sh
+DISPLAY=:0 xev > /tmp/xev.log 2>&1 &
+# 取日志里 "Outer window is 0x...." 的值
+DISPLAY=:0 XEV_WINDOW=0x1800001 go test -tags integration -run TestXTestInputToXev -v
+grep keysym /tmp/xev.log   # 应能看到 z / A / Up / F5 / Ctrl-a 等
+```
+
 ## 性能
 
 - 转换与输出是零分配（复用缓冲）、只写变化格、颜色游程缓存，本机 80×24 合成源可达 600+ fps。
@@ -90,6 +113,6 @@ Termux / Termux:X11 上最常见的两个坑：
 
 ## 限制
 
-- 只传输画面，不传输音频；不改变窗口内容，也不接管 X 输入（键鼠回传留待后续）。
+- 只传输画面，不传输音频；不改变窗口内容。键鼠回传需显式开启 `-input`（仅 `x11` 源，走 XTest）。
 - `x11` 后端假设 24/32bpp TrueColor；16bpp 未处理。
 - 真彩需要终端支持 24-bit 颜色（`COLORTERM=truecolor`）。

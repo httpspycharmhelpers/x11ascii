@@ -136,6 +136,8 @@ func run() int {
 	use256 := flag.Bool("256", false, "用 ANSI-256 调色板量化颜色（省带宽、兼容老终端）")
 	verbose := flag.Bool("v", true, "输出源/显示等诊断信息到 stderr")
 	probe := flag.Bool("probe", false, "连接 X11 并打印 screen/depth/抓帧自检后退出")
+	input := flag.Bool("input", false, "把终端键盘/鼠标事件回传给 X（XTest，仅 x11 源；Ctrl+C 退出）")
+	mouse := flag.Bool("mouse", true, "input 模式下启用终端鼠标报告")
 	flag.Parse()
 
 	if *probe {
@@ -188,6 +190,19 @@ func run() int {
 	}
 	defer src.Close()
 
+	var xsrc *x11Source
+	if *input {
+		if xs, ok := src.(*x11Source); ok {
+			if err := xs.initInput(); err != nil {
+				fmt.Fprintln(os.Stderr, "启用输入失败:", err)
+			} else {
+				xsrc = xs
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "警告: -input 仅对 x11 源有效")
+		}
+	}
+
 	// 先进 alt screen 之前先抓一帧：失败时错误信息在普通终端上可见
 	var frame Frame
 	var canvas Canvas
@@ -211,7 +226,20 @@ func run() int {
 
 	quit := make(chan struct{})
 	var onceQuit sync.Once
-	if tty {
+	inputOn := interactive && xsrc != nil
+	if inputOn {
+		if *mouse {
+			os.Stdout.WriteString("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+			defer os.Stdout.WriteString("\x1b[?1006l\x1b[?1002l\x1b[?1000l")
+		}
+		pump := &inputPump{
+			src:    fdSource{fd: stdin},
+			sink:   xsrc,
+			onQuit: func() { onceQuit.Do(func() { close(quit) }) },
+		}
+		go pump.run()
+		xsrc.setTermSize(cols, rows)
+	} else if tty {
 		go readQuit(stdin, quit, &onceQuit)
 	}
 	sigs := make(chan os.Signal, 1)
@@ -260,6 +288,9 @@ func run() int {
 					rows = r
 				}
 			}
+		}
+		if xsrc != nil {
+			xsrc.setTermSize(cols, rows)
 		}
 
 		if err := src.Grab(&frame); err != nil {

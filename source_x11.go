@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/BurntSushi/xgb"
 	"github.com/BurntSushi/xgb/xproto"
@@ -22,6 +23,11 @@ type x11Source struct {
 	lsb   bool
 	path  string
 	fixed bool
+
+	symMap     map[uint32]keySlot
+	mod        [8]byte
+	aw, ah     int32 // 最近一次抓帧的源像素尺寸（供鼠标坐标映射，原子访问）
+	cols, rows int32 // 终端网格尺寸（原子访问）
 }
 
 // dialX11 自己解析 DISPLAY 并连接，避免 xgb 硬编码 /tmp/.X11-unix（Termux 无 /tmp）。
@@ -158,6 +164,9 @@ func (s *x11Source) Grab(f *Frame) error {
 	}
 	stride := len(data) / s.h
 	bpp := stride / s.w
+
+	atomic.StoreInt32(&s.aw, int32(s.w))
+	atomic.StoreInt32(&s.ah, int32(s.h))
 
 	f.alloc(s.w, s.h)
 	for row := 0; row < s.h; row++ {
