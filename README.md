@@ -7,6 +7,56 @@
 - **增量输出**：只重画变化过的格子，并缓存当前颜色，大幅减少字节。
 - 输出**分辨率可指定**（`-w` 列 / `-h` 行）。
 
+
+## 静态编译（给没有 Termux 的设备用）
+
+MT 管理器之类的应用里没法 `pkg install`，所以提供不依赖任何 Termux 库的静态二进制：
+
+```bash
+./build-static.sh            # 本机架构 + android/arm64
+./build-static.sh all        # android/arm64、linux/arm64、linux/amd64
+```
+
+产物在 `dist/`。`android/arm64` 那个只挂 Android 系统自带的 `linker64`，
+拷到任何有终端的 App（MT 管理器、Termux、新建终端都能跑）里 `chmod +x` 即可，
+不需要装 Termux、不需要 X11 包（只抓屏/看图不需要 X 服务，注入输入才需要）。
+
+## 运行中随时调：缩放 / 分辨率 / 输入层
+
+以前这些只能在启动时用 `-w/-h` 定死，想改得退出重开。现在不用了：
+
+| 按键 | 作用 |
+|---|---|
+| `+` / `-` | 放大 / 缩小画面（放大=格子少字大，缩小=格子多更细腻） |
+| `1`..`6` | 切预设分辨率：60x18 / 80x24 / 100x30 / 120x36 / 160x48 / 200x60 |
+| `0` | 跟随终端大小（自适应） |
+| `f` | 保持画面比例 <-> 拉伸铺满 |
+| `?` | 打印这张表 |
+| `` ` `` | 打开/关闭**输入层**（`-typekey` 可改这个键；关掉时它不会发给程序） |
+
+画面比终端小就居中留黑，比终端大就居中裁掉，不会顶坏终端布局。
+这些热键在没开 `-input`、甚至没有 X 源（`-source test/cmd`）时也照样能用。
+
+### 输入层：打字、挪光标、粘贴
+
+按 `` ` `` 打开，底部出现输入框并接管键盘（此时按键不会发给被包裹的程序）：
+
+| 按键 | 作用 |
+|---|---|
+| `←` `→` | 移动光标（**这是之前完全缺失的能力**） |
+| `Home` / `End` | 行首 / 行尾 |
+| `↑` `↓` | 翻输入历史 |
+| `Backspace` / `Delete` | 删光标前 / 后 |
+| `Ctrl+A` / `Ctrl+E` | 行首 / 行尾 |
+| `Ctrl+U` / `Ctrl+W` / `Ctrl+K` | 清空 / 删一个词 / 删到行尾 |
+| `回车` | 逐字发给 X 程序（中文走 XSendEvent Unicode 码点） |
+| `Ctrl+回车` | 写进 X 的 CLIPBOARD 并发 `Ctrl+V`（粘贴） |
+| `Ctrl+X` | 从 X 的 CLIPBOARD 把内容读回输入框 |
+| `Esc` 或 `` ` `` | 回游戏 |
+
+手机剪贴板：终端里按 `Ctrl+Shift+V`，粘贴进来的文字会直接进输入框（终端送来的就是字节流，
+多字节也支持）；在输入框里用方向键改完再回车发出去。
+
 ## 构建
 
 ```sh
@@ -46,6 +96,10 @@ go build -o x11ascii .
 ./x11ascii -source x11 -display :0 -input \
   -exec "env GDK_BACKEND=x11 MOZ_ENABLE_WAYLAND=0 MOZ_DISABLE_GPU=1 MOZ_WEBRENDER=0 \
          MOZ_ACCELERATED=0 GDK_GL=disable LIBGL_ALWAYS_SOFTWARE=1 firefox about:blank"
+
+# 一条命令完整流程：开 X11 + 轻量窗口管理器 → 起 DOSBox → 定位其窗口 → 渲染，退出时全部关掉
+./x11ascii -session -display :1 -input -w 120 -h 30 \
+  -exec "env SDL_VIDEODRIVER=x11 dosbox -fullscreen -c 'mount c ~/dosgames/wolf' -c 'c:' -c 'WOLF3D.EXE'"
 ```
 
 交互模式下按 `q`（或 Ctrl+C）退出；开了 `-input` 后 `q` 等键会转发给 X，用 **Ctrl+C** 退出。
@@ -58,6 +112,7 @@ go build -o x11ascii .
 | `-source` | `auto`(默认) \| `x11` \| `cmd` \| `test` |
 | `-display` | X display，如 `:0`；留空用 `$DISPLAY` |
 | `-region` | 抓屏区域 `WxH` 或 `WxH+X+Y` |
+| `-window` | 只抓单个窗口：`auto`(最大窗口) \| `name:子串`(标题匹配) \| `0xID`；留空=整个屏幕 |
 | `-cmd` | `cmd` 源的命令，stdout 必须是 rgb24 原始帧 |
 | `-srcsize` | 源帧尺寸 `WxH`（`cmd`/`test` 用，默认 320x200） |
 | `-fps` | 目标帧率（默认 30） |
@@ -71,6 +126,43 @@ go build -o x11ascii .
 | `-exec` | 先启动并包裹一个命令（如 `dosbox ...`），本程序退出时结束它 |
 | `-render` | 用 XRender 在服务端把整屏缩到终端网格再回传（默认开；失败自动回退 `XGetImage`） |
 | `-idle-fps` | 画面无变化时降到的帧率（默认 5；`0`=不降帧） |
+| `-session` | 一条命令跑完整流程：开 X11（+窗口管理器）→ 起 `-exec` 程序 → 定位其窗口 → 渲染；退出时按 程序→桌面→X11 全部关掉 |
+| `-desktop` | `-session` 时的窗口管理器命令（默认 `xfwm4`，很轻）；**没有 WM 时很多程序不会真正绘制，只会剩空白/花屏**。填 `dbus-launch --exit-with-session xfce4-session` 可用完整 XFCE 桌面 |
+| `-x11-args` | `-session` 时传给 `termux-x11` 的参数（默认 `-legacy-drawing -force-bgra`） |
+| `-wait` | 首次抓屏前先等几秒，给被启动的程序留出绘制时间 |
+| `-fit` | 保持源画面宽高比，居中留黑边，避免被拉伸变形（默认开） |
+| `-hold` | `-input` 模式下按键“按住”时长（毫秒，默认 60），利于游戏识别移动 |
+| `-ctrl` | 把普通键当成长按 Ctrl，如 `-ctrl z`。**终端不会上报“单独按 Ctrl”**，DOS 里“按住 Ctrl 射击/斜跑”的游戏必须靠它 |
+| `-ctrl-hold` | `-ctrl` 冒充出来的 Ctrl 按住多久（毫秒，默认 250）。按住不放会自动重复，等于持续射击 |
+| `-quit-taps` | 快速连点几下就退出（默认 3，`0` 关闭）。纯触屏用户唯一的退路 |
+| `-quit-key` | 指定单键退出，如 `-quit-key F12` |
+| `-keybar` | 画面下方画一条可点的虚拟键盘条，占几行（默认 `-input` 时 2，`0` 关闭）。带 `FIRE` 键和可锁定的 `CTRL`/`ALT`/`SHIFT` |
+| `-fire-key` | 虚拟键盘 `FIRE` 键发出什么组合键（默认 `ctrl`，即长按 Ctrl）。游戏用别的键就写 `-fire-key space` |
+| `-esc-wait` | ESC 后等转义序列后续字节的毫秒数（默认 150）。方向键/F 键/扩展键靠它，**调太小会被拆成单键**（方向键失灵还乱打字） |
+
+### 手机上怎么打字和按出组合键
+
+- **字母/数字/标点**：输入法直接打，全部支持（`a-z`、`A-Z`、`0-9`、所有 ASCII 标点），大写字母自动带 Shift。
+- **方向键 / Home / End / PgUp / PgDn / F1-F12 / Shift+Tab**：Termux 扩展键行发的转义序列全部解析，`-input` 下会正确注入到 X 程序。
+- **组合键**：扩展键行的 `CTRL+方向键` 这类序列解析正确（`CSI 1;5A` = Ctrl+↑），游戏里的斜跑、加速都能用。
+- **裸 Ctrl / Alt（输入法给不了的）**：两种办法
+  1. 屏幕底部的虚拟键盘条（`-keybar`，默认开）：`CTRL` 点一下锁定（变黄底），再点方向键就是 Ctrl+方向；`SHIFT` 同理，用来打大写；`FIRE` 直接发长按 Ctrl。
+  2. `-map` / 键位表把一个普通键当修饰键：`-map 'x=ctrl'`（点 x 就是长按 Ctrl，射击用）。
+
+### 怎么退出（重要）
+
+不会再出现“只能靠另一个终端 kill”的情况，任何一种都能退：
+
+| 方式 | 怎么用 | 适合 |
+|---|---|---|
+| 关闭目标窗口 | 浏览器点右上角 X、游戏自己退出 → 工具自动回 Termux | **触屏最自然** |
+| 快速连点 | 连点 3 下（次数用 `-quit-taps` 调） | 纯触屏，没有键盘 |
+| 双击 Esc | 400ms 内按两下 Esc | 有键盘或软键盘 |
+| `Ctrl+C` | 照旧 | 有键盘 |
+| 单键 | `-quit-key F12` / `-quit-key q` | 自定义 |
+| 兜底 | 另一终端 `pkill -INT -f x11ascii` | 极端情况 |
+
+退出时终端会自动恢复（退出备用屏、关掉鼠标上报、还原 raw 模式），不会把 shell 弄坏。
 
 ## 颜色
 
@@ -131,6 +223,41 @@ grep keysym /tmp/xev.log   # 应能看到 z / A / Up / F5 / Ctrl-a 等
 
 注意（Termux:X11）：Firefox 默认的 GPU/GL 初始化会卡住导致只出 10×10 占位窗口，
 用上面的 `GDK_GL=disable LIBGL_ALWAYS_SOFTWARE=1 …` 关掉即可正常出窗。
+
+## 一条命令跑完整流程
+
+`-session` 把整条链路串起来，退出时自动收干净（程序 → 窗口管理器 → X11）：
+
+```sh
+./x11ascii -session -input -w 120 -h 30 \
+  -exec "env SDL_VIDEODRIVER=x11 dosbox -fullscreen -c 'mount c ~/dosgames/wolf' -c 'c:' -c 'WOLF3D.EXE'"
+```
+
+流程：**输入命令 → 开启 X11（+窗口管理器）→ 启动 DOSBox → 定位它的窗口 → 缩放/拼接/回传按键 → 回到 Termux 操作 → Ctrl+C 退出并全部关掉**。
+
+关键点：
+
+- **必须有窗口管理器**。Termux:X11 上没有 WM 时，DOSBox/SDL 之类的程序**不会真正绘制**，
+  读到的只是一片未初始化的窗口内存（表现为下半截发黑、图案重复拼贴）。默认用 `xfwm4`（纯 WM，很轻，
+  不带 XFCE 面板/桌面）；想要完整桌面就 `-desktop "dbus-launch --exit-with-session xfce4-session"`。
+- **窗口定位**：`-exec` 启动程序后默认按 `_NET_WM_PID` 精确定位它的窗口，匹配不到则退回“最大的可见窗口”，
+  窗口出现得晚也会自动切过去。也可显式指定：`-window auto` / `-window name:火狐` / `-window 0xID`。
+- **像素从根窗口读、按窗口矩形裁剪**。直接对窗口 drawable 做 `XGetImage`/RENDER 在 Termux:X11 上会读到
+  过期内容，所以只用窗口的尺寸和位置做裁剪，读取源始终是根窗口。
+- **声音与本工具无关**：音频是程序自己直接输出到 Android 的，不经过 ASCII 管线。
+  想听声音就别加 `-nosound`，必要时 `SDL_AUDIODRIVER=pulseaudio`；工具退出时子进程被杀，声音也随之停止。
+
+## 单窗口模式
+
+只抓某个窗口、放到终端里：
+
+```sh
+# auto=最大窗口，name:子串=按标题，0xID=固定窗口 ID
+./x11ascii -source x11 -display :0 -window auto -input -w 120 -h 30
+```
+
+`-window` 模式下会自动跟随窗口的移动/缩放；窗口还没出现时会先黑屏，出现后自动显示。
+`-fit`（默认开）保证按原始宽高比显示，终端变形或横竖屏切换时也不会被压扁。
 
 ## 限制
 

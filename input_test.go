@@ -48,8 +48,8 @@ func (r *recSink) mouseBtn(btn int, press bool, col, row int) {
 func (r *recSink) mouseMove(col, row int) {
 	r.mice = append(r.mice, recMouse{"move", 0, false, col, row})
 }
-func (r *recSink) wheel(up bool, col, row int) {
-	r.mice = append(r.mice, recMouse{"wheel", 0, up, col, row})
+func (r *recSink) wheel(dir int, col, row int) {
+	r.mice = append(r.mice, recMouse{"wheel", dir, true, col, row})
 }
 
 func pumpBytes(t *testing.T, data []byte) *recSink {
@@ -157,7 +157,7 @@ func TestPumpMouse(t *testing.T) {
 	if m := s.mice[1]; m.kind != "btn" || m.btn != 1 || m.pressed {
 		t.Errorf("左键释放=%+v", m)
 	}
-	if m := s.mice[2]; m.kind != "wheel" || !m.pressed || m.col != 3 || m.row != 4 {
+	if m := s.mice[2]; m.kind != "wheel" || m.btn != 0 || m.col != 3 || m.row != 4 {
 		t.Errorf("滚轮上=%+v", m)
 	}
 	if m := s.mice[3]; m.kind != "move" || m.col != 7 || m.row != 8 {

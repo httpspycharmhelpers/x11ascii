@@ -94,6 +94,25 @@ func (w *Writer) Clear() {
 	w.curX, w.curY = -1, -1
 }
 
+// WriteStatus 在画面下方写虚拟键盘条（每行一条，含颜色转义）。
+func (w *Writer) WriteStatus(lines []string) error {
+	if len(lines) == 0 {
+		return nil
+	}
+	b := w.scratch[:0]
+	for i, ln := range lines {
+		b = append(b, "\x1b["...)
+		b = strconv.AppendInt(b, int64(w.rows+i+1), 10)
+		b = append(b, ";1H\x1b[K"...)
+		b = append(b, ln...)
+	}
+	// 光标已经挪到画面之外，通知下一次 Write 重新绝对定位
+	w.curX, w.curY = -1, -1
+	w.buf.Write(b)
+	w.scratch = b[:0]
+	return w.buf.Flush()
+}
+
 func (w *Writer) Write(c *Canvas) error {
 	if w.cols != c.Cols || w.rows != c.Rows {
 		w.cols, w.rows = c.Cols, c.Rows

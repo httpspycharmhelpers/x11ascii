@@ -28,7 +28,7 @@ func TestXTestInputToXev(t *testing.T) {
 	if _, err := fmt.Sscanf(strings.TrimPrefix(winStr, "0x"), "%x", &win); err != nil {
 		t.Fatalf("解析 XEV_WINDOW: %v", err)
 	}
-	s, err := newX11Source(disp, "")
+	s, err := newX11Source(disp, "", "", false, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

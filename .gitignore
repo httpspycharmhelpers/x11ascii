@@ -1,1 +1,4 @@
 /x11ascii
+/dist/
+*.mp4
+*.jsonl

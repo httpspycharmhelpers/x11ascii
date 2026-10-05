@@ -3,6 +3,7 @@ package main
 type Frame struct {
 	W, H, Stride int
 	Pix          []byte
+	Aspect       bool // true: convert 时按源宽高比 letterbox，避免拉伸变形
 }
 
 func (f *Frame) alloc(w, h int) {
