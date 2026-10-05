@@ -33,6 +33,7 @@ for t in "${targets[@]}"; do
 		CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
 		go build -trimpath -ldflags="-s -w" -o "$OUT/$name" . || {
 			echo "  失败: $t"; continue; }
+	chmod +x "$OUT/$name"
 	need=$(readelf -d "$OUT/$name" 2>/dev/null | grep -ci 'NEEDED.*libc\|libX11\|libtermux' || true)
 	echo "  -> $OUT/$name  $(stat -c%s "$OUT/$name") 字节  动态库依赖: $need"
 done

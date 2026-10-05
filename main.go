@@ -14,9 +14,23 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
+
+// resizeTTY 用 TIOCSWINSZ 真的把终端改成 cols x rows（Termux 会立刻重排画面）。
+// 这才是「分辨率」的意思：格子数变了，每个字符占的物理像素也跟着变。
+// 以前只改渲染格子数、不动终端，所以放大后字还是原来那么大，看着像没放大。
+func resizeTTY(cols, rows int) bool {
+	fd := int(os.Stdout.Fd())
+	ws := struct{ Row, Col, X, Y uint16 }{
+		uint16(rows), uint16(cols), uint16(cols * 8), uint16(rows * 16),
+	}
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
+		uintptr(fd), uintptr(syscall.TIOCSWINSZ), uintptr(unsafe.Pointer(&ws)))
+	return errno == 0
+}
 
 func main() {
 	os.Exit(run())
@@ -161,6 +175,7 @@ func run() int {
 	ctrlAs := flag.String("ctrl", "", "把普通键当成长按 Ctrl（逗号分隔，如 \"a\" 或 \"q,w\"）。终端不会上报「单独按 Ctrl」，游戏开枪/斜跑要用")
 	var maps multiFlag
 	flag.Var(&maps, "map", "自定义键位，可重复：-map 't=ctrl-tab' -map 'j=down,k=up'（手机上的键 → 程序实际收到的组合键）")
+	resizeTerm := flag.Bool("resize-term", true, "缩放/切分辨率时真的把终端改成对应尺寸（像素跟着变大变小；-resize-term=false 只改画面不动终端）")
 	keybarRows := flag.Int("keybar", -1, "画面下方虚拟键盘条占几行（-1=input 模式默认 2，0=关闭）")
 	typeKey := flag.String("typekey", "`", "打开/关闭输入层的按键（输入层里可以打字、挪光标、粘贴；默认反引号）")
 	fireKey := flag.String("fire-key", "ctrl", "虚拟键盘 FIRE 键发出的组合键（默认 ctrl=长按 Ctrl 开火；游戏用别的键就改这里，如 space/alt）")
@@ -268,7 +283,11 @@ func run() int {
 
 	interactive := tty && !*once
 	manualSize := false
-	var screen Canvas
+	// canvas 是 convert 的输出，placed 是居中摆放的输出。必须分开：
+	// 以前摆完直接 canvas = screen，两块内存共用同一段 Pix，下一帧
+	// convert 写进 screen、blitCenter 又拿 screen 当 dst 先清空再自拷贝 → 全黑。
+	// 缩放改终端尺寸后最容易触发（尺寸一变就走居中分支）。
+	var canvas, placed Canvas
 
 	// 虚拟键盘条：吃掉底部若干行，剩下的才是画面
 	barRows := *keybarRows
@@ -283,6 +302,31 @@ func run() int {
 		imgRows = 4
 	}
 	ui.vc.syncTerm(cols, rows, barRows)
+	ui.vc.setRestore(cols, rows)
+
+	// 缩放/切分辨率 → 终端也跟着变尺寸（像素随之变大变小）。
+	// 回调里同时更新 cols/rows，下一帧直接按新尺寸画，不用等 SIGWINCH。
+	if tty && *resizeTerm {
+		ui.vc.resizeTerm = true
+		ui.vc.onSize = func(c, r int) {
+			if c < 20 {
+				c = 20
+			}
+			if r < 8 {
+				r = 8
+			}
+			if resizeTTY(c, r) {
+				fmt.Fprintf(os.Stderr, "终端尺寸 %dx%d\n", c, r)
+			}
+			cols, rows = c, r
+			barRows = ui.barRows(barRows)
+			imgRows = rows - barRows
+			if imgRows < 4 {
+				imgRows = 4
+			}
+			ui.vc.syncTerm(cols, rows, barRows)
+		}
+	}
 
 	fitOn := *fit
 	src, err := buildSource(*source, *display, *region, *windowSel, *command, *srcsize, *renderOn, fitOn, *holdMS, *ctrlHold, *verbose)
@@ -316,7 +360,6 @@ func run() int {
 
 	// 先进 alt screen 之前先抓一帧：失败时错误信息在普通终端上可见
 	var frame Frame
-	var canvas Canvas
 	if *waitSec > 0 {
 		fmt.Fprintf(os.Stderr, "等待 %d 秒让程序绘制…\n", *waitSec)
 		time.Sleep(time.Duration(*waitSec) * time.Second)
@@ -581,18 +624,19 @@ func run() int {
 			return 1
 		}
 		convert(&frame, imgCols, imgH, &canvas)
+		draw := &canvas
 		// 画面比终端小的时候居中摆放，四周留黑；比终端大的时候居中裁掉
 		if imgCols != cols || imgH != rows-offY {
-			blitCenter(&canvas, &screen, cols, rows, offX, offY)
-			canvas = screen
+			blitCenter(&canvas, &placed, cols, rows, offX, offY)
+			draw = &placed
 		}
 		// 触屏没有指针，把最后点到的位置反白出来（纯触屏操作浏览器/桌面必需）
 		if ts := tapAt.Load(); ts != drawnTap {
 			drawnTap = ts
-			canvas.setMark(int(tapCol.Load()), int(tapRow.Load()))
+			draw.setMark(int(tapCol.Load()), int(tapRow.Load()))
 		}
 		if ts := tapAt.Load(); ts != 0 && time.Since(time.Unix(0, ts)) < 1800*time.Millisecond {
-			canvas.drawMark()
+			draw.drawMark()
 		}
 		if interactive && atomic.SwapInt32(&needClear, 0) == 1 {
 			if xs, ok := src.(*x11Source); ok {
@@ -600,7 +644,7 @@ func run() int {
 			}
 			out.Clear()
 		}
-		if err := out.Write(&canvas); err != nil {
+		if err := out.Write(draw); err != nil {
 			return 1
 		}
 		if kb != nil && kb.dirty {
