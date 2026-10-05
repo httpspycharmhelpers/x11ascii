@@ -64,12 +64,17 @@ func TestViewCtlPresetsAndAuto(t *testing.T) {
 
 func TestViewCtlFitToggle(t *testing.T) {
 	v := newViewCtl()
+	// 默认铺满：横屏/弹软键盘时终端一变宽，保持比例就会两侧留大片黑边
+	if v.fitOn() {
+		t.Fatal("默认应铺满（不保持比例）")
+	}
+	v.toggleFit()
 	if !v.fitOn() {
-		t.Fatal("默认应保持比例")
+		t.Fatal("按 f 之后应变成保持比例")
 	}
 	v.toggleFit()
 	if v.fitOn() {
-		t.Fatal("切一次应变成拉伸")
+		t.Fatal("再按 f 应回到铺满")
 	}
 }
 

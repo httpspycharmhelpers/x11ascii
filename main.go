@@ -32,6 +32,119 @@ func resizeTTY(cols, rows int) bool {
 	return errno == 0
 }
 
+// framePipe 把「抓屏」和「画 ASCII」拆成两条线。
+//
+// 为什么要拆：抓一张 1080x1470 的画面在 Termux:X11 上要 100ms 以上（实测整屏只有
+// 5~9 fps，跟输出多大无关），以前渲染循环每一帧都等抓屏，于是缩放、切分辨率、
+// 按键这些 UI 操作全被拖成 5fps —— 看着就是「卡」。
+// 现在抓屏在后台跑（抓慢了就丢帧，绝不排队），UI 这边固定 20fps：
+// 画面按抓屏速度更新，而缩放/键盘条/输入层立刻响应，跟迷宫游戏切分辨率一个手感。
+type framePipe struct {
+	mu    sync.Mutex
+	free  []*Frame
+	ready *Frame
+	gen   uint64
+	drawn uint64
+	stop  chan struct{}
+	err   error
+}
+
+func newFramePipe(n int) *framePipe {
+	p := &framePipe{stop: make(chan struct{})}
+	for i := 0; i < n; i++ {
+		p.free = append(p.free, &Frame{})
+	}
+	return p
+}
+
+// take 拿走最新一帧（渲染线程用），用完记得 put 回去。
+func (p *framePipe) take() (*Frame, uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	f := p.ready
+	g := p.gen
+	p.ready = nil
+	if f == nil {
+		return nil, g
+	}
+	return f, g
+}
+
+// drawnGen 取当前代数（每发布一帧 +1），用来判断画布是不是已经落后了。
+func (p *framePipe) drawnGen() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.gen
+}
+
+func (p *framePipe) put(f *Frame) {
+	if f == nil {
+		return
+	}
+	p.mu.Lock()
+	p.free = append(p.free, f)
+	p.mu.Unlock()
+}
+
+func (p *framePipe) get() *Frame {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.free) == 0 {
+		return nil // 渲染线程正占着，跳过这一帧（丢帧优于堆积）
+	}
+	f := p.free[len(p.free)-1]
+	p.free = p.free[:len(p.free)-1]
+	return f
+}
+
+func (p *framePipe) publish(f *Frame) {
+	p.mu.Lock()
+	if p.ready != nil {
+		p.free = append(p.free, p.ready) // 旧的还没被看就丢掉
+	}
+	p.ready = f
+	p.gen++
+	p.mu.Unlock()
+}
+
+// startGrab 后台循环抓屏。grab 慢不阻塞渲染，渲染也不需要等它。
+func startGrab(src Source, pipe *framePipe) {
+	go func() {
+		for {
+			f := pipe.get()
+			if f == nil {
+				select {
+				case <-pipe.stop:
+					return
+				case <-time.After(8 * time.Millisecond):
+				}
+				continue
+			}
+			if err := src.Grab(f); err != nil {
+				pipe.put(f)
+				pipe.mu.Lock()
+				pipe.err = err
+				pipe.mu.Unlock()
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					return
+				}
+				select {
+				case <-pipe.stop:
+					return
+				case <-time.After(200 * time.Millisecond):
+				}
+				continue
+			}
+			pipe.publish(f)
+			select {
+			case <-pipe.stop:
+				return
+			default:
+			}
+		}
+	}()
+}
+
 func main() {
 	os.Exit(run())
 }
@@ -164,9 +277,9 @@ func run() int {
 	frames := flag.Int("frames", 0, "渲染多少帧后退出（0=不限）")
 	once := flag.Bool("once", false, "只渲染一帧后退出")
 	use256 := flag.Bool("256", false, "用 ANSI-256 调色板量化颜色（省带宽、兼容老终端）")
-	renderOn := flag.Bool("render", true, "用 XRender 在服务端缩放整屏（大幅省带宽，失败自动回退 XGetImage）")
+	renderOn := flag.Bool("render", false, "用 XRender 在服务端缩放整屏。实测 Termux:X11 上更慢（5fps vs 9fps，软件缩放抢 CPU），默认关；-render 打开")
 	idleFPS := flag.Int("idle-fps", 5, "画面无变化时降到的帧率（0=不降帧）")
-	fit := flag.Bool("fit", true, "保持源画面宽高比（letterbox 留黑边），避免被拉伸变形")
+	fit := flag.Bool("fit", false, "保持源画面宽高比（letterbox，会留黑边）。默认关＝强制铺满整个终端，横屏/弹键盘时两侧不留黑边；按 f 随时切")
 	holdMS := flag.Int("hold", 60, "input 模式下按键“按住”时长（毫秒），利于游戏识别移动")
 	ctrlHold := flag.Int("ctrl-hold", 250, "-ctrl 冒充的 Ctrl 按住时长（毫秒），游戏要“按住持续射击”")
 	escWait := flag.Int("esc-wait", 150, "ESC 后等待转义序列后续字节的毫秒数（方向键/F 键/扩展键靠它，太小会被拆成单键）")
@@ -282,12 +395,18 @@ func run() int {
 	}
 
 	interactive := tty && !*once
-	manualSize := false
+	realCols, realRows := -1, -1 // 终端真实尺寸，用来发现旋转/软键盘引起的外部变化
+	reqCols, reqRows := 0, 0     // 我们自己请求过的终端尺寸（用来区分外部变化）
 	// canvas 是 convert 的输出，placed 是居中摆放的输出。必须分开：
 	// 以前摆完直接 canvas = screen，两块内存共用同一段 Pix，下一帧
 	// convert 写进 screen、blitCenter 又拿 screen 当 dst 先清空再自拷贝 → 全黑。
 	// 缩放改终端尺寸后最容易触发（尺寸一变就走居中分支）。
 	var canvas, placed Canvas
+	// cur 是最近抓到的一帧，一直留着：缩放/切分辨率时不用等下一次抓屏（要 100ms+），
+	// 直接拿旧像素按新格子数重新采样，所以按键到画面是这一帧（约 1/20 秒）就变了。
+	var cur *Frame
+	convCols, convRows := -1, -1 // 上次 convert 用的格子数
+	convGen := uint64(0)
 
 	// 虚拟键盘条：吃掉底部若干行，剩下的才是画面
 	barRows := *keybarRows
@@ -318,6 +437,9 @@ func run() int {
 			if resizeTTY(c, r) {
 				fmt.Fprintf(os.Stderr, "终端尺寸 %dx%d\n", c, r)
 			}
+			// 记下是我们自己要的这个尺寸。下一帧从终端读回来的尺寸如果就是它，
+			// 说明是自己改的，不能当成「外部变化」——否则缩放会被自己取消掉。
+			reqCols, reqRows = c, r
 			cols, rows = c, r
 			barRows = ui.barRows(barRows)
 			imgRows = rows - barRows
@@ -368,6 +490,11 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "首次抓屏失败:", err)
 		return 1
 	}
+	// 抓屏丢到后台线程：渲染循环固定 20fps，缩放/切分辨率/按键不再被 100ms 的抓屏卡住
+	pipe := newFramePipe(3)
+	pipe.publish(&frame)
+	startGrab(src, pipe)
+	defer close(pipe.stop)
 
 	var rs *rawState
 	if interactive {
@@ -572,12 +699,23 @@ func run() int {
 			}
 		}
 
+		// 每帧读一次终端真实尺寸。变了就说明是外部行为（横竖屏、软键盘、
+		// 用户自己拖窗口），这时连手动缩放一起作废、重新跟随 —— 否则缩放一次之后
+		// 终端再变宽，画面还钉在旧格子上，两侧留一大片黑边。
 		if tty {
 			if c, r, ok := termSize(stdin); ok {
-				if *fw == 0 && !manualSize {
+				if c != realCols || r != realRows {
+					realCols, realRows = c, r
+					if c == reqCols && r == reqRows {
+						reqCols, reqRows = 0, 0 // 自己改的，正常生效
+					} else {
+						ui.vc.followTerm() // 横竖屏/软键盘/用户拖动
+					}
+				}
+				if *fw == 0 {
 					cols = c
 				}
-				if *fh == 0 && !manualSize {
+				if *fh == 0 {
 					rows = r
 				}
 			}
@@ -589,7 +727,6 @@ func run() int {
 		}
 		ui.vc.syncTerm(cols, rows, barRows)
 		imgCols, imgH, offX, offY := ui.vc.img()
-		manualSize = ui.vc.manualSize()
 		// fit 可以用 f 键随时切，不用退出重开
 		if xs, ok := src.(*x11Source); ok {
 			xs.setFit(ui.vc.fitOn())
@@ -616,14 +753,29 @@ func run() int {
 			}
 		}
 
-		if err := src.Grab(&frame); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		// 取后台抓到的最新一帧；抓屏慢时这里拿到的是上一帧，画布照旧重排，
+		// 所以缩放、切分辨率、键盘条都是满 20fps 的即时响应。
+		if f, _ := pipe.take(); f != nil {
+			if cur != nil {
+				pipe.put(cur)
+			}
+			cur = f
+		}
+		if cur != nil && (convCols != imgCols || convRows != imgH || pipe.drawnGen() != convGen) {
+			convert(cur, imgCols, imgH, &canvas)
+			convCols, convRows, convGen = imgCols, imgH, pipe.drawnGen()
+		}
+		pipe.mu.Lock()
+		grabErr := pipe.err
+		pipe.err = nil
+		pipe.mu.Unlock()
+		if grabErr != nil {
+			if errors.Is(grabErr, io.EOF) || errors.Is(grabErr, io.ErrUnexpectedEOF) {
 				return 0
 			}
-			fmt.Fprintln(os.Stderr, "抓屏错误:", err)
+			fmt.Fprintln(os.Stderr, "抓屏错误:", grabErr)
 			return 1
 		}
-		convert(&frame, imgCols, imgH, &canvas)
 		draw := &canvas
 		// 画面比终端小的时候居中摆放，四周留黑；比终端大的时候居中裁掉
 		if imgCols != cols || imgH != rows-offY {

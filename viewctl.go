@@ -38,7 +38,21 @@ type viewCtl struct {
 }
 
 func newViewCtl() *viewCtl {
-	return &viewCtl{zoom: 1, tc: 80, tr: 24, fitRatio: true}
+	// fitRatio 默认 false：强制铺满整个终端。横屏或弹出软键盘时终端一变宽，
+	// 保持比例就意味着两侧一大片黑边（用户实测的问题）；按 f 随时切回保持比例。
+	return &viewCtl{zoom: 1, tc: 80, tr: 24, fitRatio: false}
+}
+
+// followTerm 外部把终端尺寸改了（横竖屏切换、软键盘弹出收起、用户自己拖）之后
+// 重新跟随：丢掉手动尺寸、缩放回 1:1、按新尺寸重算格子。
+// 以前只有「没手动缩放过」时才读终端尺寸，于是缩放一次之后终端再变宽，
+// 画面还钉在旧的格子上，两侧全是黑边。
+func (v *viewCtl) followTerm() {
+	v.mu.Lock()
+	v.cols, v.rows = 0, 0
+	v.zoom = 1
+	v.manual = false
+	v.mu.Unlock()
 }
 
 // setRestore 记下启动时的终端尺寸，按 0 用它恢复。

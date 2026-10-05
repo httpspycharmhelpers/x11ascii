@@ -19,6 +19,8 @@ import (
 
 type x11Source struct {
 	conn *xgb.Conn
+	// lastXform 记着上次下发给 X 的缩放矩阵，避免每帧重设（见 grabRender）
+	lastXform string
 	// inConn 只用来做 XTEST 注入。必须和抓画面的连接分开：实测 Termux X11 里
 	// 同一连接一旦 GetImage 抓过画面，后续 XTEST 的指针事件就不再投递给客户端
 	// （键盘不受影响），表现就是"点了没反应"。
@@ -302,20 +304,26 @@ func (s *x11Source) grabRender(f *Frame) error {
 			offX = (gw - dw) / 2
 		}
 	}
-	sx := float64(s.w) / float64(dw)
-	sy := float64(s.h) / float64(dh)
-	var t render.Transform
-	t.Matrix11 = render.Fixed(int32(sx*65536 + 0.5))
-	t.Matrix22 = render.Fixed(int32(sy*65536 + 0.5))
-	t.Matrix13 = render.Fixed(int32(s.gx) * 65536)
-	t.Matrix23 = render.Fixed(int32(s.gy) * 65536)
-	t.Matrix33 = render.Fixed(1 << 16)
-	if err := render.SetPictureTransformChecked(s.conn, s.srcPic, t).Check(); err != nil {
-		return err
+	// 缩放矩阵只在「尺寸或比例变了」时才需要重设。以前每帧都 SetPictureTransform
+	// 而且 .Check() 等回复 —— 一帧两次 round trip，实测把帧率压到 5fps。
+	// 现在按 key 跳过重设，Composite 也不等回复（下面的 GetImage 本来就会同步）。
+	key := fmt.Sprintf("%d:%d:%d:%d:%v:%d:%d", s.w, s.h, dw, dh, atomic.LoadInt32(&s.fit) != 0, s.gx, s.gy)
+	if key != s.lastXform {
+		sx := float64(s.w) / float64(dw)
+		sy := float64(s.h) / float64(dh)
+		var t render.Transform
+		t.Matrix11 = render.Fixed(int32(sx*65536 + 0.5))
+		t.Matrix22 = render.Fixed(int32(sy*65536 + 0.5))
+		t.Matrix13 = render.Fixed(int32(s.gx) * 65536)
+		t.Matrix23 = render.Fixed(int32(s.gy) * 65536)
+		t.Matrix33 = render.Fixed(1 << 16)
+		if err := render.SetPictureTransformChecked(s.conn, s.srcPic, t).Check(); err != nil {
+			return err
+		}
+		s.lastXform = key
 	}
-	if err := render.CompositeChecked(s.conn, render.PictOpSrc, s.srcPic, 0, s.dstPic, 0, 0, 0, 0, int16(offX), int16(offY), uint16(dw), uint16(dh)).Check(); err != nil {
-		return err
-	}
+	_ = render.Composite(s.conn, render.PictOpSrc, s.srcPic, 0, s.dstPic,
+		0, 0, 0, 0, int16(offX), int16(offY), uint16(dw), uint16(dh))
 	reply, err := xproto.GetImage(s.conn, xproto.ImageFormatZPixmap, xproto.Drawable(s.pix), 0, 0, uint16(gw), uint16(gh), 0xffffffff).Reply()
 	if err != nil {
 		return err
@@ -692,8 +700,6 @@ func (s *x11Source) Grab(f *Frame) error {
 					dst[x*3+0], dst[x*3+1], dst[x*3+2] = p[0], p[1], p[2]
 				}
 			}
-		default:
-			return fmt.Errorf("不支持的像素字节数 %d（需 24/32bpp）", bpp)
 		}
 	}
 	return nil
